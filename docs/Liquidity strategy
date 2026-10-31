@@ -1,0 +1,71 @@
+//@version=5
+strategy("1H S/R Liquidity Sweep + 20 EMA Backtest", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.05)
+
+// --- 1. INPUT PARAMETERS ---
+pivotLen = input.int(20, "S/R Pivot Lookback (Bars)", minval=5)
+emaLen   = input.int(20, "Confirmation EMA Length", minval=5)
+rrRatio  = input.float(2.0, "Risk-to-Reward Ratio", minval=0.5, step=0.5)
+sweepWindow = input.int(5, "Max Bars Between Sweep & EMA Close", minval=1)
+
+// --- 2. INDICATORS & S/R LEVELS ---
+ema20 = ta.ema(close, emaLen)
+plot(ema20, color=color.yellow, title="20 EMA", linewidth=2)
+
+// Identify Support & Resistance via Confirmed Pivots
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float resistanceLevel = na
+var float supportLevel    = na
+
+if not na(ph)
+    resistanceLevel := ph
+if not na(pl)
+    supportLevel := pl
+
+plot(resistanceLevel, color=color.red, style=plot.style_circles, title="Resistance")
+plot(supportLevel, color=color.green, style=plot.style_circles, title="Support")
+
+// --- 3. LIQUIDITY SWEEP TRACKING ---
+// Upside liquidity sweep: price pierces above Resistance, Track highest wick
+var int lastBullSweepBar = na
+var float sweepHigh = na
+if not na(resistanceLevel) and high > resistanceLevel and close < resistanceLevel
+    lastBullSweepBar := bar_index
+    sweepHigh := high
+
+// Downside liquidity sweep: price pierces below Support, Track lowest wick
+var int lastBearSweepBar = na
+var float sweepLow = na
+if not na(supportLevel) and low < supportLevel and close > supportLevel
+    lastBearSweepBar := bar_index
+    sweepLow := low
+
+// --- 4. ENTRY CONFIRMATION (20 EMA CLOSE) ---
+// Short: Recent upside sweep within window + Candle closes below 20 EMA
+shortCondition = not na(lastBullSweepBar) and (bar_index - lastBullSweepBar <= sweepWindow) and ta.crossunder(close, ema20) and strategy.position_size == 0
+
+// Long: Recent downside sweep within window + Candle closes above 20 EMA
+longCondition  = not na(lastBearSweepBar) and (bar_index - lastBearSweepBar <= sweepWindow) and ta.crossover(close, ema20) and strategy.position_size == 0
+
+// --- 5. EXECUTION & RISK MANAGEMENT ---
+var float stopLoss   = na
+var float takeProfit = na
+
+if shortCondition
+    stopLoss   := math.max(high, sweepHigh) * 1.001 // Slight buffer above sweep wick
+    float risk = stopLoss - close
+    if risk > 0
+        takeProfit := close - (risk * rrRatio)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", "Short", stop=stopLoss, limit=takeProfit)
+        lastBullSweepBar := na // Reset after taking trade
+
+if longCondition
+    stopLoss   := math.min(low, sweepLow) * 0.999 // Slight buffer below sweep wick
+    float risk = close - stopLoss
+    if risk > 0
+        takeProfit := close + (risk * rrRatio)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", "Long", stop=stopLoss, limit=takeProfit)
+        lastBearSweepBar := na // Reset after taking trade
